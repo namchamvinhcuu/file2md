@@ -1,0 +1,15 @@
+.claude/
+.gemini/
+
+# Per-machine symlinks (vault, skill vaults) — không commit, tạo lại bằng harness setup script
+.obsidian-vault
+.python-skill
+.common-skill
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

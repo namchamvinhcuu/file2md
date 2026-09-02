@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>file2md — Convert sang Markdown</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --border: #e2e2e6;
+    --text: #1b1b1f;
+    --muted: #6b6b73;
+    --accent: #4f46e5;
+    --accent-hover: #4338ca;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --panel: #1f1f24;
+      --border: #34343b;
+      --text: #eaeaee;
+      --muted: #9a9aa2;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 4rem;
+  }
+  h1 {
+    font-size: 1.5rem;
+    margin-bottom: 0.25rem;
+  }
+  p.subtitle {
+    color: var(--muted);
+    margin-top: 0;
+    margin-bottom: 1.75rem;
+  }
+  .tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .tab-btn {
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  .tab-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+  }
+  textarea {
+    width: 100%;
+    min-height: 220px;
+    resize: vertical;
+    padding: 0.75rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9rem;
+  }
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 2.5rem 1rem;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .dropzone.dragover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .dropzone input { display: none; }
+  #file-name {
+    margin-top: 0.75rem;
+    font-size: 0.9rem;
+  }
+  .hidden { display: none !important; }
+  .actions {
+    margin-top: 1rem;
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+  }
+  button.primary {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 0.6rem 1.4rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.95rem;
+  }
+  button.primary:hover { background: var(--accent-hover); }
+  button.primary:disabled { opacity: 0.6; cursor: not-allowed; }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.55rem 1.1rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  #error {
+    color: #dc2626;
+    margin-top: 0.75rem;
+    font-size: 0.9rem;
+  }
+  #result-section {
+    margin-top: 2rem;
+  }
+  #result-section h2 {
+    font-size: 1.05rem;
+    margin-bottom: 0.5rem;
+  }
+  #result {
+    width: 100%;
+    min-height: 320px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>file2md</h1>
+  <p class="subtitle">Dán text hoặc upload file .txt / .pdf để chuyển thành Markdown.</p>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="paste">Dán text</button>
+    <button class="tab-btn" data-tab="upload">Upload file</button>
+  </div>
+
+  <div class="panel">
+    <div id="tab-paste">
+      <textarea id="paste-text" placeholder="Dán nội dung vào đây..."></textarea>
+    </div>
+    <div id="tab-upload" class="hidden">
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="file-input" accept=".txt,.pdf" />
+        <span>Kéo-thả file .txt/.pdf vào đây, hoặc bấm để chọn</span>
+        <div id="file-name"></div>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="convert-btn">Convert</button>
+      <span id="status"></span>
+    </div>
+    <div id="error"></div>
+  </div>
+
+  <div id="result-section" class="hidden">
+    <h2>Kết quả</h2>
+    <div class="panel">
+      <textarea id="result" readonly></textarea>
+      <div class="actions">
+        <button class="secondary" id="copy-btn">Copy</button>
+        <button class="primary" id="download-btn">Tải xuống .md</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+  const tabButtons = document.querySelectorAll(".tab-btn");
+  const tabPaste = document.getElementById("tab-paste");
+  const tabUpload = document.getElementById("tab-upload");
+  let activeTab = "paste";
+
+  tabButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      activeTab = btn.dataset.tab;
+      tabButtons.forEach((b) => b.classList.toggle("active", b === btn));
+      tabPaste.classList.toggle("hidden", activeTab !== "paste");
+      tabUpload.classList.toggle("hidden", activeTab !== "upload");
+    });
+  });
+
+  const fileInput = document.getElementById("file-input");
+  const dropzone = document.getElementById("dropzone");
+  const fileNameEl = document.getElementById("file-name");
+  let selectedFile = null;
+
+  function setSelectedFile(file) {
+    selectedFile = file;
+    fileNameEl.textContent = file ? `Đã chọn: ${file.name}` : "";
+  }
+
+  fileInput.addEventListener("change", () => setSelectedFile(fileInput.files[0] || null));
+
+  ["dragover", "dragenter"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    })
+  );
+  ["dragleave", "drop"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+    })
+  );
+  dropzone.addEventListener("drop", (e) => {
+    const file = e.dataTransfer.files[0];
+    if (file) setSelectedFile(file);
+  });
+
+  const convertBtn = document.getElementById("convert-btn");
+  const statusEl = document.getElementById("status");
+  const errorEl = document.getElementById("error");
+  const resultSection = document.getElementById("result-section");
+  const resultEl = document.getElementById("result");
+  let lastFilename = "converted.md";
+
+  convertBtn.addEventListener("click", async () => {
+    errorEl.textContent = "";
+    const form = new FormData();
+
+    if (activeTab === "upload") {
+      if (!selectedFile) {
+        errorEl.textContent = "Chọn 1 file .txt hoặc .pdf trước.";
+        return;
+      }
+      form.append("file", selectedFile);
+    } else {
+      const text = document.getElementById("paste-text").value;
+      if (!text.trim()) {
+        errorEl.textContent = "Dán nội dung trước.";
+        return;
+      }
+      form.append("text", text);
+    }
+
+    convertBtn.disabled = true;
+    statusEl.textContent = "Đang convert...";
+
+    try {
+      const res = await fetch("/api/convert", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Convert thất bại.");
+      }
+      resultEl.value = data.markdown;
+      lastFilename = data.filename;
+      resultSection.classList.remove("hidden");
+    } catch (err) {
+      errorEl.textContent = err.message;
+    } finally {
+      convertBtn.disabled = false;
+      statusEl.textContent = "";
+    }
+  });
+
+  document.getElementById("copy-btn").addEventListener("click", async () => {
+    await navigator.clipboard.writeText(resultEl.value);
+  });
+
+  document.getElementById("download-btn").addEventListener("click", () => {
+    const blob = new Blob([resultEl.value], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = lastFilename;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+</script>
+</body>
+</html>
