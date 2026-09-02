@@ -1,10 +1,18 @@
 .claude/
 .gemini/
 
+# CLAUDE.md / AGENTS.md = symlink per-máy tới shared claude-agents repo → không commit
+CLAUDE.md
+AGENTS.md
+
 # Per-machine symlinks (vault, skill vaults) — không commit, tạo lại bằng harness setup script
 .obsidian-vault
 .python-skill
 .common-skill
+
+# Code-intelligence artifacts per-máy — Serena marker + graphify graph (rebuild bằng harness script)
+.serena/
+graphify-out/
 
 # Python
 .venv/
