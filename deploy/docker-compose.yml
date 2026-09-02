@@ -1,0 +1,16 @@
+# Deploy trên VPS chia sẻ (nginx-proxy-manager làm reverse-proxy chung cho nhiều project,
+# xem .obsidian-vault/Current-State.md §Production — LIVE). `initial_network` phải tồn tại
+# sẵn trên host (docker network create initial_network) trước khi `docker compose up`.
+services:
+  file2md:
+    image: evilhero/file2md:latest
+    container_name: file2md
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    networks:
+      - initial_network
+
+networks:
+  initial_network:
+    external: true
