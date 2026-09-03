@@ -1,0 +1,4 @@
+# Dev-only — cần cho chạy test, KHÔNG cần trong image production (Dockerfile không install file này).
+-r requirements.txt
+pytest>=8.0
+pytest-asyncio>=0.24

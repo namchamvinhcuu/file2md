@@ -7,21 +7,38 @@
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #f7f7f8;
-    --panel: #ffffff;
-    --border: #e2e2e6;
-    --text: #1b1b1f;
-    --muted: #6b6b73;
-    --accent: #4f46e5;
-    --accent-hover: #4338ca;
+    /* Primitive tokens */
+    --indigo-600: #4f46e5;
+    --indigo-700: #4338ca;
+    --gray-50: #f7f7f8;
+    --white: #ffffff;
+    --gray-200: #e2e2e6;
+    --gray-500: #6b6b73;
+    --gray-900: #1b1b1f;
+    --red-600: #dc2626;
+    --gray-950: #16161a;
+    --gray-850: #1f1f24;
+    --gray-700: #34343b;
+    --gray-100: #eaeaee;
+    --gray-400: #9a9aa2;
+
+    /* Semantic tokens */
+    --bg: var(--gray-50);
+    --panel: var(--white);
+    --border: var(--gray-200);
+    --text: var(--gray-900);
+    --muted: var(--gray-500);
+    --accent: var(--indigo-600);
+    --accent-hover: var(--indigo-700);
+    --danger: var(--red-600);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #16161a;
-      --panel: #1f1f24;
-      --border: #34343b;
-      --text: #eaeaee;
-      --muted: #9a9aa2;
+      --bg: var(--gray-950);
+      --panel: var(--gray-850);
+      --border: var(--gray-700);
+      --text: var(--gray-100);
+      --muted: var(--gray-400);
     }
   }
   * { box-sizing: border-box; }
@@ -127,9 +144,40 @@
     font-size: 0.9rem;
   }
   #error {
-    color: #dc2626;
+    color: var(--danger);
     margin-top: 0.75rem;
     font-size: 0.9rem;
+  }
+  header.topbar {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  button.link {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0;
+    text-decoration: underline;
+  }
+  button.link:hover { color: var(--text); }
+  .provider-row {
+    margin-top: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    color: var(--muted);
+  }
+  .provider-row select {
+    padding: 0.35rem 0.5rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
   }
   #result-section {
     margin-top: 2rem;
@@ -146,8 +194,13 @@
 </head>
 <body>
 <main>
-  <h1>file2md</h1>
-  <p class="subtitle">Dán text hoặc upload file .txt / .pdf để chuyển thành Markdown.</p>
+  <header class="topbar">
+    <div>
+      <h1>file2md</h1>
+      <p class="subtitle">Dán text hoặc upload file .txt / .pdf để chuyển thành Markdown.</p>
+    </div>
+    <button class="link" id="logout-btn">Đăng xuất</button>
+  </header>
 
   <div class="tabs">
     <button class="tab-btn active" data-tab="paste">Dán text</button>
@@ -157,6 +210,16 @@
   <div class="panel">
     <div id="tab-paste">
       <textarea id="paste-text" placeholder="Dán nội dung vào đây..."></textarea>
+      <div class="provider-row">
+        <label for="llm-provider">Convert bằng AI:</label>
+        <select id="llm-provider">
+          <option value="none">Không dùng AI (giữ nguyên)</option>
+          <option value="anthropic">Anthropic Claude</option>
+          <option value="openai">OpenAI GPT</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="deepseek">DeepSeek</option>
+        </select>
+      </div>
     </div>
     <div id="tab-upload" class="hidden">
       <label class="dropzone" id="dropzone">
@@ -253,6 +316,7 @@
         return;
       }
       form.append("text", text);
+      form.append("provider", document.getElementById("llm-provider").value);
     }
 
     convertBtn.disabled = true;
@@ -277,6 +341,11 @@
 
   document.getElementById("copy-btn").addEventListener("click", async () => {
     await navigator.clipboard.writeText(resultEl.value);
+  });
+
+  document.getElementById("logout-btn").addEventListener("click", async () => {
+    await fetch("/api/logout", { method: "POST" });
+    window.location.href = "/login.html";
   });
 
   document.getElementById("download-btn").addEventListener("click", () => {

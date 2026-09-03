@@ -19,5 +19,8 @@ graphify-out/
 __pycache__/
 *.pyc
 
+# Secrets (API key LLM) — dùng .env.example làm mẫu
+.env
+
 # OS
 .DS_Store
