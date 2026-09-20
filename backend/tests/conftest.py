@@ -3,6 +3,19 @@ from fastapi.testclient import TestClient
 
 import auth
 import main as main_module
+import temp_files
+
+
+@pytest.fixture(autouse=True)
+def _isolated_relay_storage(tmp_path, monkeypatch):
+    """Cách ly storage relay tạm (backend/temp_files.py) khỏi TEMP_UPLOAD_DIR thật
+    (mặc định /tmp/file2md-relay) và khỏi state để lại bởi test khác — mỗi test dùng
+    tmp_path riêng của chính nó; dict `_entries` là module-level state, KHÔNG tự reset
+    giữa test nên phải clear tay trước/sau."""
+    monkeypatch.setattr(temp_files, "TEMP_UPLOAD_DIR", tmp_path)
+    temp_files._entries.clear()
+    yield
+    temp_files._entries.clear()
 
 
 @pytest.fixture(autouse=True)

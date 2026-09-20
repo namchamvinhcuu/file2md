@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import os
@@ -6,14 +7,15 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from markitdown import MarkItDown, StreamInfo
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import auth
 import db
+import temp_files
 from llm_providers import PROVIDERS, LLMReformatError, reformat_to_markdown
 
 load_dotenv()
@@ -21,11 +23,14 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 PUBLIC_PATHS = {"/api/login", "/login.html"}
+# /dl/<token>/<filename> phải public — hệ thống ngoài (không có cookie) tự GET để tải file
+# relay tạm (xem backend/temp_files.py). Bảo vệ bằng token ngẫu nhiên + TTL, không bằng login.
+PUBLIC_PREFIXES = ("/dl/",)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
-        if request.url.path in PUBLIC_PATHS:
+        if request.url.path in PUBLIC_PATHS or request.url.path.startswith(PUBLIC_PREFIXES):
             return await call_next(request)
         token = request.cookies.get(auth.SESSION_COOKIE_NAME)
         username = auth.verify_session_token(token) if token else None
@@ -46,9 +51,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await db.init_pool()
+    sweep_task = asyncio.create_task(temp_files.sweep_expired_loop())
     try:
         yield
     finally:
+        sweep_task.cancel()
         await db.close_pool()
 
 
@@ -58,6 +65,10 @@ app.add_middleware(AuthMiddleware)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}
 LLM_MAX_TEXT_LENGTH = int(os.environ.get("LLM_MAX_TEXT_LENGTH", "20000"))
+# URL public dùng để build link /dl/... trả về cho caller (VD OpenClaw). Rỗng → tự suy ra
+# từ Host header của request (đủ dùng khi reverse-proxy forward Host gốc, như NPM đang làm).
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+MAX_RELAY_UPLOAD_BYTES = int(os.environ.get("MAX_RELAY_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 
 _markitdown = MarkItDown()
 
@@ -137,6 +148,59 @@ async def convert(
         raise HTTPException(400, "Cần dán text hoặc chọn file .txt/.pdf")
 
     return JSONResponse({"markdown": markdown, "filename": f"{base_name}.md"})
+
+
+_UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+async def _read_upload_within_limit(file: UploadFile, limit: int) -> bytes:
+    # Đọc theo chunk + abort ngay khi vượt giới hạn — đọc hết `await file.read()` rồi mới
+    # check len() sẽ buffer toàn bộ body (có thể nhiều GB) vào RAM trước khi bị reject.
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, f"File vượt giới hạn {limit // (1024 * 1024)}MB.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@app.post("/api/temp-upload")
+async def temp_upload(request: Request, file: UploadFile):
+    if not file.filename:
+        raise HTTPException(400, "Thiếu file.")
+    content = await _read_upload_within_limit(file, MAX_RELAY_UPLOAD_BYTES)
+    try:
+        token, filename = await asyncio.to_thread(temp_files.save_temp_file, file.filename, content)
+    except temp_files.UnsupportedRelayExtension as exc:
+        ext = str(exc) or "(không rõ định dạng)"
+        allowed = ", ".join(sorted(temp_files.ALLOWED_RELAY_EXTENSIONS))
+        raise HTTPException(
+            400, f"Chỉ hỗ trợ relay file {allowed}, nhận được: {ext}"
+        ) from None
+    if PUBLIC_BASE_URL:
+        url = f"{PUBLIC_BASE_URL}/dl/{token}/{filename}"
+    else:
+        logger.warning(
+            "PUBLIC_BASE_URL chưa set — URL /dl/ dùng scheme suy ra từ request, có thể sai "
+            "http/https khi chạy sau reverse-proxy không forward đúng X-Forwarded-Proto."
+        )
+        url = str(request.url_for("download_temp_file", token=token, filename=filename))
+    return JSONResponse({"url": url, "expires_in_seconds": temp_files.TEMP_UPLOAD_TTL_SECONDS})
+
+
+@app.get("/dl/{token}/{filename}")
+async def download_temp_file(token: str, filename: str):
+    path = await asyncio.to_thread(temp_files.get_temp_file, token, filename)
+    if path is None or not path.is_file():
+        raise HTTPException(404, "File không tồn tại hoặc đã hết hạn.")
+    response = FileResponse(path, filename=filename)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
