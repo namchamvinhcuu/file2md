@@ -84,14 +84,18 @@ def test_temp_upload_saved_file_is_downloadable_via_returned_url(client, monkeyp
 # ---------------------------------------------------------------------------
 
 
-def test_temp_upload_with_txt_extension_returns_400(client):
+def test_temp_upload_with_unsupported_extension_returns_400(client):
+    # .exe không thuộc bất kỳ engine WeKnora nào (anydoc/builtin/simple) — vẫn phải reject.
+    # (KHÔNG dùng .txt nữa — .txt giờ hợp lệ, thuộc simple engine của ALLOWED_RELAY_EXTENSIONS.)
     resp = client.post(
         "/api/temp-upload",
-        files={"file": ("notes.txt", b"hello", "text/plain")},
+        files={"file": ("virus.exe", b"hello", "application/octet-stream")},
     )
 
     assert resp.status_code == 400
-    assert ".pdf" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert ".pdf" in detail
+    assert ".exe" in detail
 
 
 def test_temp_upload_over_size_limit_returns_413(client, monkeypatch):
@@ -152,6 +156,26 @@ def test_download_temp_file_expired_token_returns_404(unauthed_client, monkeypat
     resp = unauthed_client.get(f"/dl/{token}/{filename}")
 
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Regression — mở rộng ALLOWED_RELAY_EXTENSIONS cho .html (2026-09-20): lý do .html được
+# coi an toàn để relay là FileResponse LUÔN trả Content-Disposition: attachment (không phải
+# inline) — browser tải xuống thay vì render inline same-origin, nên không có stored-XSS.
+# Test này khoá đúng behavior đó, không chỉ tin giả định.
+# ---------------------------------------------------------------------------
+
+
+def test_download_temp_html_file_has_attachment_content_disposition(unauthed_client):
+    token, filename = temp_files.save_temp_file("page.html", b"<script>alert(1)</script>")
+
+    resp = unauthed_client.get(f"/dl/{token}/{filename}")
+
+    assert resp.status_code == 200
+    assert resp.content == b"<script>alert(1)</script>"
+    content_disposition = resp.headers.get("content-disposition", "")
+    assert content_disposition.startswith("attachment")
+    assert "inline" not in content_disposition
 
 
 # ---------------------------------------------------------------------------

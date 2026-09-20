@@ -12,7 +12,18 @@ logger = logging.getLogger(__name__)
 
 TEMP_UPLOAD_DIR = Path(os.environ.get("TEMP_UPLOAD_DIR", "/tmp/file2md-relay"))
 TEMP_UPLOAD_TTL_SECONDS = int(os.environ.get("TEMP_UPLOAD_TTL_SECONDS", str(30 * 60)))
-ALLOWED_RELAY_EXTENSIONS = {".pdf"}
+# Toàn bộ định dạng WeKnora hỗ trợ parse (đọc từ parser_engine_rules thật của WeKnora,
+# xem .obsidian-vault/Features/temp-file-relay.md) — anydoc/builtin/simple engine gộp lại.
+ALLOWED_RELAY_EXTENSIONS = {
+    # anydoc engine
+    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".epub",
+    ".docm", ".odp", ".ods", ".odt", ".pptm", ".rtf", ".xmind", ".xlsm",
+    # builtin engine
+    ".mhtml", ".md", ".markdown", ".htm", ".html", ".jpg", ".jpeg",
+    ".png", ".gif", ".bmp", ".tiff", ".webp",
+    # simple engine
+    ".csv", ".txt", ".json", ".mp3", ".wav", ".m4a", ".flac", ".ogg",
+}
 
 _SWEEP_INTERVAL_SECONDS = 5 * 60
 _SAFE_STEM_RE = re.compile(r"[^A-Za-z0-9._-]")

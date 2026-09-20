@@ -40,8 +40,9 @@ def test_save_temp_file_returns_token_registered_in_entries(tmp_path):
 
 
 @pytest.mark.parametrize(
+    # .txt KHÔNG còn dùng ở đây — .txt giờ hợp lệ (simple engine trong ALLOWED_RELAY_EXTENSIONS).
     "bad_name",
-    ["notes.txt", "malware.exe", "no-extension-at-all"],
+    ["malware.bin", "malware.exe", "no-extension-at-all"],
 )
 def test_save_temp_file_unsupported_extension_raises(bad_name):
     with pytest.raises(temp_files.UnsupportedRelayExtension):
@@ -50,9 +51,107 @@ def test_save_temp_file_unsupported_extension_raises(bad_name):
 
 def test_save_temp_file_unsupported_extension_does_not_write_any_file(tmp_path):
     with contextlib.suppress(temp_files.UnsupportedRelayExtension):
-        temp_files.save_temp_file("notes.txt", b"content")
+        temp_files.save_temp_file("malware.bin", b"content")
 
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# save_temp_file — ALLOWED_RELAY_EXTENSIONS mở rộng (2026-09-20, WeKnora cần relay nhiều
+# loại tài liệu ngoài PDF) — mỗi extension mới phải được accept đúng, ghi file đúng nội dung.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "page.html",
+        "page.htm",
+        "notes.md",
+        "image.png",
+        "photo.jpg",
+        "photo.jpeg",
+        "doc.docx",
+        "slides.pptx",
+        "sheet.xlsx",
+    ],
+)
+def test_save_temp_file_accepts_each_extended_extension(filename, tmp_path):
+    token, saved_filename = temp_files.save_temp_file(filename, b"content")
+
+    assert saved_filename == filename
+    saved_path = tmp_path / token / saved_filename
+    assert saved_path.exists()
+    assert saved_path.read_bytes() == b"content"
+
+
+# ---------------------------------------------------------------------------
+# save_temp_file — mở rộng ALLOWED_RELAY_EXTENSIONS lần 2 (2026-09-20, 36 extension gộp 3
+# engine WeKnora: anydoc/builtin/simple) — test ĐẠI DIỆN cho mỗi engine, không test hết 36.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        # anydoc engine — thêm mới ngoài .docx/.pptx/.xlsx đã test ở trên
+        "legacy.doc",
+        "book.epub",
+        "letter.rtf",
+        "mindmap.xmind",
+        # builtin engine — thêm mới ngoài .html/.htm/.md/.png/.jpg/.jpeg đã test ở trên
+        "archive.mhtml",
+        "readme.markdown",
+        "photo.gif",
+        "photo.webp",
+        # simple engine — HOÀN TOÀN MỚI (trước lần mở rộng này, .txt/.csv/.json bị reject)
+        "data.csv",
+        "notes.txt",
+        "config.json",
+        "song.mp3",
+        "voice.wav",
+    ],
+)
+def test_save_temp_file_accepts_representative_extension_per_weknora_engine(filename, tmp_path):
+    token, saved_filename = temp_files.save_temp_file(filename, b"content")
+
+    assert saved_filename == filename
+    saved_path = tmp_path / token / saved_filename
+    assert saved_path.exists()
+    assert saved_path.read_bytes() == b"content"
+
+
+# ---------------------------------------------------------------------------
+# Regression — mở rộng ALLOWED_RELAY_EXTENSIONS (2026-09-20, giờ 36 extension gộp 3 engine
+# WeKnora: anydoc/builtin/simple) KHÔNG được vô tình accept-all: extension ngoài TOÀN BỘ 3
+# engine vẫn phải reject. (.txt/.csv/.json/.md/.html/... giờ đã hợp lệ nên KHÔNG dùng ở đây
+# nữa — dùng loại binary/executable không thuộc bất kỳ engine nào.)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    ["malware.exe", "archive.zip", "trojan.dll", "no-extension-at-all"],
+)
+def test_save_temp_file_still_rejects_extensions_outside_extended_allowlist(bad_name):
+    with pytest.raises(temp_files.UnsupportedRelayExtension):
+        temp_files.save_temp_file(bad_name, b"content")
+
+
+# ---------------------------------------------------------------------------
+# save_temp_file — case-sensitivity: extension viết hoa vẫn được nhận, vì save_temp_file()
+# dùng Path(original_filename).suffix.lower() để validate/tạo tên file cuối.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("filename", ["REPORT.PDF", "Slide.PPTX", "Image.PNG"])
+def test_save_temp_file_accepts_uppercase_extension(filename, tmp_path):
+    token, saved_filename = temp_files.save_temp_file(filename, b"content")
+
+    expected_filename = Path(filename).stem + Path(filename).suffix.lower()
+    assert saved_filename == expected_filename
+    saved_path = tmp_path / token / saved_filename
+    assert saved_path.exists()
 
 
 # ---------------------------------------------------------------------------
