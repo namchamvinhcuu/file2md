@@ -49,12 +49,20 @@ def _safe_filename(original_name: str, ext: str) -> str:
     return f"{safe_stem[:_MAX_STEM_LENGTH]}{ext}"
 
 
+def check_extension(filename: str) -> str:
+    """Validate extension theo ALLOWED_RELAY_EXTENSIONS, trả về ext đã lowercase.
+    Raise UnsupportedRelayExtension nếu không hợp lệ — dùng để pre-validate cả batch
+    file TRƯỚC khi lưu bất kỳ file nào (all-or-nothing, tránh phải rollback)."""
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_RELAY_EXTENSIONS:
+        raise UnsupportedRelayExtension(ext)
+    return ext
+
+
 def save_temp_file(original_filename: str, content: bytes) -> tuple[str, str]:
     """Lưu file relay tạm (blocking I/O — caller nên chạy qua asyncio.to_thread trong
     context async). Trả về (token, filename an toàn để đưa vào URL /dl/)."""
-    ext = Path(original_filename).suffix.lower()
-    if ext not in ALLOWED_RELAY_EXTENSIONS:
-        raise UnsupportedRelayExtension(ext)
+    ext = check_extension(original_filename)
     token = secrets.token_urlsafe(24)
     filename = _safe_filename(original_filename, ext)
     token_dir = TEMP_UPLOAD_DIR / token
@@ -83,6 +91,12 @@ def get_temp_file(token: str, filename: str) -> Optional[Path]:
         _discard(token)
         return None
     return entry.path
+
+
+def discard_temp_file(token: str) -> None:
+    """Xoá 1 file relay + entry của nó ngay (dùng để rollback batch khi 1 file giữa
+    chừng lưu lỗi, giữ đúng nghĩa all-or-nothing)."""
+    _discard(token)
 
 
 def _discard(token: str) -> None:

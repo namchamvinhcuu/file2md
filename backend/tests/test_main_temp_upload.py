@@ -7,11 +7,14 @@ Storage đã cách ly khỏi TEMP_UPLOAD_DIR thật qua fixture autouse `_isolat
 """
 
 import asyncio
+import io
 import logging
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
+from fastapi.testclient import TestClient
 
+import auth
 import main as main_module
 import temp_files
 
@@ -40,13 +43,15 @@ def test_temp_upload_with_valid_pdf_returns_200_with_dl_url(client, monkeypatch)
     monkeypatch.setattr(main_module, "PUBLIC_BASE_URL", "")  # deterministic: dùng request.url_for
     resp = client.post(
         "/api/temp-upload",
-        files={"file": ("report.pdf", b"%PDF-1.4 fake content", "application/pdf")},
+        files=[("files", ("report.pdf", b"%PDF-1.4 fake content", "application/pdf"))],
     )
 
     assert resp.status_code == 200
     body = resp.json()
-    assert "/dl/" in body["url"]
-    assert body["url"].endswith(".pdf")
+    assert len(body["files"]) == 1
+    entry = body["files"][0]
+    assert "/dl/" in entry["url"]
+    assert entry["url"].endswith(".pdf")
     assert body["expires_in_seconds"] == temp_files.TEMP_UPLOAD_TTL_SECONDS
 
 
@@ -54,11 +59,11 @@ def test_temp_upload_with_public_base_url_uses_it_as_prefix(client, monkeypatch)
     monkeypatch.setattr(main_module, "PUBLIC_BASE_URL", "https://relay.example.com")
     resp = client.post(
         "/api/temp-upload",
-        files={"file": ("report.pdf", b"content", "application/pdf")},
+        files=[("files", ("report.pdf", b"content", "application/pdf"))],
     )
 
     assert resp.status_code == 200
-    url = resp.json()["url"]
+    url = resp.json()["files"][0]["url"]
     assert url.startswith("https://relay.example.com/dl/")
     assert url.endswith(".pdf")
 
@@ -67,16 +72,174 @@ def test_temp_upload_saved_file_is_downloadable_via_returned_url(client, monkeyp
     monkeypatch.setattr(main_module, "PUBLIC_BASE_URL", "")
     upload_resp = client.post(
         "/api/temp-upload",
-        files={"file": ("report.pdf", b"conteudo-do-pdf", "application/pdf")},
+        files=[("files", ("report.pdf", b"conteudo-do-pdf", "application/pdf"))],
     )
     assert upload_resp.status_code == 200
-    url = upload_resp.json()["url"]
+    url = upload_resp.json()["files"][0]["url"]
     path = "/" + url.split("://", 1)[1].split("/", 1)[1]  # strip scheme://host, giữ /dl/...
 
     download_resp = client.get(path)
 
     assert download_resp.status_code == 200
     assert download_resp.content == b"conteudo-do-pdf"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/temp-upload — multi-file (2026-09-20, endpoint đổi từ nhận 1 file sang nhận
+# NHIỀU file cùng lúc — field `files` lặp lại nhiều lần trong multipart request).
+# ---------------------------------------------------------------------------
+
+
+def test_temp_upload_with_three_valid_files_returns_200_with_three_entries(client, monkeypatch):
+    monkeypatch.setattr(main_module, "PUBLIC_BASE_URL", "")
+    resp = client.post(
+        "/api/temp-upload",
+        files=[
+            ("files", ("a.pdf", b"content-a", "application/pdf")),
+            ("files", ("b.pdf", b"content-b", "application/pdf")),
+            ("files", ("c.pdf", b"content-c", "application/pdf")),
+        ],
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    entries = body["files"]
+    assert len(entries) == 3
+    # Mỗi entry có filename + url RIÊNG (không trùng nhau).
+    assert {e["filename"] for e in entries} == {"a.pdf", "b.pdf", "c.pdf"}
+    assert len({e["url"] for e in entries}) == 3
+
+    # Cả 3 file đều download được qua URL riêng của nó, đúng nội dung tương ứng.
+    expected_content_by_name = {"a.pdf": b"content-a", "b.pdf": b"content-b", "c.pdf": b"content-c"}
+    for entry in entries:
+        path = "/" + entry["url"].split("://", 1)[1].split("/", 1)[1]
+        download_resp = client.get(path)
+        assert download_resp.status_code == 200
+        assert download_resp.content == expected_content_by_name[entry["filename"]]
+
+
+def test_temp_upload_batch_with_one_bad_extension_returns_400_and_saves_nothing(client):
+    # File thứ 2 (giữa 2 file hợp lệ) có extension không hỗ trợ — all-or-nothing: toàn bộ
+    # batch bị reject, KHÔNG file nào (kể cả a.pdf/c.pdf hợp lệ) được lưu xuống disk.
+    resp = client.post(
+        "/api/temp-upload",
+        files=[
+            ("files", ("a.pdf", b"content-a", "application/pdf")),
+            ("files", ("virus.exe", b"content-bad", "application/octet-stream")),
+            ("files", ("c.pdf", b"content-c", "application/pdf")),
+        ],
+    )
+
+    assert resp.status_code == 400
+    assert ".exe" in resp.json()["detail"]
+    # Không leak file đã lưu trước khi validate hết batch — _entries phải rỗng.
+    assert temp_files._entries == {}
+
+
+# ---------------------------------------------------------------------------
+# Regression — python-reviewer finding 🟠: OSError lúc SAVE (không phải lỗi extension bị
+# chặn ở vòng validate TRƯỚC KHI lưu gì) file thứ N giữa batch phải rollback toàn bộ file
+# batch này đã lưu trước đó qua temp_files.discard_temp_file(), không leak "thành công 1
+# nửa" khi response cuối cùng báo lỗi cả batch. Khác test all-or-nothing extension ở trên
+# (lỗi đó bị chặn TRƯỚC khi save() được gọi lần nào) — test này đi đúng qua nhánh
+# try/except rollback mới quanh vòng save.
+#
+# Dùng TestClient riêng với raise_server_exceptions=False: TestClient mặc định (fixture
+# `client` ở conftest.py) re-raise exception unhandled NGAY trong process test (không trả
+# response) — verify thực nghiệm. Muốn thấy đúng response 500 mà 1 client thật/uvicorn sẽ
+# nhận, phải tắt raise_server_exceptions.
+# ---------------------------------------------------------------------------
+
+
+def test_temp_upload_batch_save_oserror_midway_rolls_back_already_saved_files(monkeypatch):
+    test_client = TestClient(main_module.app, raise_server_exceptions=False)
+    test_client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token("test-user"))
+
+    original_save = temp_files.save_temp_file
+    call_log: list[str] = []
+
+    def _flaky_save(filename, content):
+        call_log.append(filename)
+        if filename == "b.pdf":
+            raise OSError("disk full (simulated)")
+        return original_save(filename, content)
+
+    monkeypatch.setattr(temp_files, "save_temp_file", _flaky_save)
+
+    resp = test_client.post(
+        "/api/temp-upload",
+        files=[
+            ("files", ("a.pdf", b"content-a", "application/pdf")),
+            ("files", ("b.pdf", b"content-b", "application/pdf")),
+            ("files", ("c.pdf", b"content-c", "application/pdf")),
+        ],
+    )
+
+    assert resp.status_code == 500
+    # file thứ 3 KHÔNG được gọi tới — vòng save dừng ngay khi file thứ 2 raise OSError.
+    assert call_log == ["a.pdf", "b.pdf"]
+    # file thứ 1 đã lưu thành công trước đó phải bị rollback — không leak trong _entries.
+    assert temp_files._entries == {}
+
+
+def test_temp_upload_exactly_max_files_per_request_returns_200(client):
+    cap = main_module.MAX_RELAY_FILES_PER_REQUEST
+    resp = client.post(
+        "/api/temp-upload",
+        files=[("files", (f"f{i}.pdf", b"x", "application/pdf")) for i in range(cap)],
+    )
+
+    assert resp.status_code == 200
+    assert len(resp.json()["files"]) == cap
+
+
+def test_temp_upload_over_max_files_per_request_returns_400(client):
+    cap = main_module.MAX_RELAY_FILES_PER_REQUEST
+    resp = client.post(
+        "/api/temp-upload",
+        files=[("files", (f"f{i}.pdf", b"x", "application/pdf")) for i in range(cap + 1)],
+    )
+
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert str(cap) in detail
+    assert str(cap + 1) in detail
+    # Vượt cap bị chặn TRƯỚC khi lưu file nào — _entries phải rỗng.
+    assert temp_files._entries == {}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/temp-upload — guard "Thiếu file."/"Thiếu tên file." ở tầng function.
+#
+# Verify Empirically: cả field `files` bị thiếu HOÀN TOÀN (không multipart part nào tên
+# "files") LẪN 1 part với filename rỗng (browser coi filename="" là KHÔNG phải file part,
+# Starlette parse thành str thường) đều bị FastAPI/pydantic chặn ở 422 TRƯỚC KHI vào tới
+# handler — verify thực nghiệm same behavior ở CẢ bản cũ (1 file, "file: UploadFile" bắt
+# buộc) lẫn bản mới ("files: list[UploadFile]" bắt buộc), KHÔNG phải regression của diff
+# này. `if not files: raise 400 "Thiếu file."` và `if not f.filename: raise 400 "Thiếu tên
+# file."` trong main.py là guard PHÒNG XA không thể chạm được qua HTTP request thật với
+# signature hiện tại — 2 test dưới gọi trực tiếp hàm `temp_upload()` (bỏ qua tầng
+# HTTP/pydantic) để verify chính guard logic đó hoạt động đúng.
+# ---------------------------------------------------------------------------
+
+
+async def test_temp_upload_function_with_empty_files_list_raises_400_thieu_file():
+    with pytest.raises(HTTPException) as exc_info:
+        await main_module.temp_upload(request=None, files=[])
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Thiếu file."
+
+
+async def test_temp_upload_function_with_blank_filename_in_batch_raises_400_thieu_ten_file():
+    valid_file = UploadFile(file=io.BytesIO(b"content"), filename="a.pdf")
+    blank_name_file = UploadFile(file=io.BytesIO(b"content"), filename="")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main_module.temp_upload(request=None, files=[valid_file, blank_name_file])
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Thiếu tên file."
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +252,7 @@ def test_temp_upload_with_unsupported_extension_returns_400(client):
     # (KHÔNG dùng .txt nữa — .txt giờ hợp lệ, thuộc simple engine của ALLOWED_RELAY_EXTENSIONS.)
     resp = client.post(
         "/api/temp-upload",
-        files={"file": ("virus.exe", b"hello", "application/octet-stream")},
+        files=[("files", ("virus.exe", b"hello", "application/octet-stream"))],
     )
 
     assert resp.status_code == 400
@@ -102,7 +265,7 @@ def test_temp_upload_over_size_limit_returns_413(client, monkeypatch):
     monkeypatch.setattr(main_module, "MAX_RELAY_UPLOAD_BYTES", 10)
     resp = client.post(
         "/api/temp-upload",
-        files={"file": ("big.pdf", b"x" * 100, "application/pdf")},
+        files=[("files", ("big.pdf", b"x" * 100, "application/pdf"))],
     )
 
     assert resp.status_code == 413
@@ -112,7 +275,7 @@ def test_temp_upload_at_exact_size_limit_still_succeeds(client, monkeypatch):
     monkeypatch.setattr(main_module, "MAX_RELAY_UPLOAD_BYTES", 10)
     resp = client.post(
         "/api/temp-upload",
-        files={"file": ("ok.pdf", b"x" * 10, "application/pdf")},
+        files=[("files", ("ok.pdf", b"x" * 10, "application/pdf"))],
     )
 
     assert resp.status_code == 200
@@ -218,7 +381,7 @@ def test_temp_upload_calls_save_temp_file_via_asyncio_to_thread(client, monkeypa
 
     resp = client.post(
         "/api/temp-upload",
-        files={"file": ("report.pdf", b"content", "application/pdf")},
+        files=[("files", ("report.pdf", b"content", "application/pdf"))],
     )
 
     assert resp.status_code == 200
@@ -299,11 +462,11 @@ def test_temp_upload_multi_chunk_body_is_correctly_reassembled(client, monkeypat
 
     resp = client.post(
         "/api/temp-upload",
-        files={"file": ("big.pdf", content, "application/pdf")},
+        files=[("files", ("big.pdf", content, "application/pdf"))],
     )
 
     assert resp.status_code == 200
-    url = resp.json()["url"]
+    url = resp.json()["files"][0]["url"]
     path = "/" + url.split("://", 1)[1].split("/", 1)[1]
 
     download_resp = client.get(path)
@@ -324,7 +487,7 @@ def test_temp_upload_without_public_base_url_logs_warning(client, monkeypatch, c
     with caplog.at_level(logging.WARNING, logger="main"):
         resp = client.post(
             "/api/temp-upload",
-            files={"file": ("report.pdf", b"content", "application/pdf")},
+            files=[("files", ("report.pdf", b"content", "application/pdf"))],
         )
 
     assert resp.status_code == 200
@@ -337,7 +500,7 @@ def test_temp_upload_with_public_base_url_does_not_log_warning(client, monkeypat
     with caplog.at_level(logging.WARNING, logger="main"):
         resp = client.post(
             "/api/temp-upload",
-            files={"file": ("report.pdf", b"content", "application/pdf")},
+            files=[("files", ("report.pdf", b"content", "application/pdf"))],
         )
 
     assert resp.status_code == 200

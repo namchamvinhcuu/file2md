@@ -69,6 +69,7 @@ LLM_MAX_TEXT_LENGTH = int(os.environ.get("LLM_MAX_TEXT_LENGTH", "20000"))
 # từ Host header của request (đủ dùng khi reverse-proxy forward Host gốc, như NPM đang làm).
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 MAX_RELAY_UPLOAD_BYTES = int(os.environ.get("MAX_RELAY_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+MAX_RELAY_FILES_PER_REQUEST = int(os.environ.get("MAX_RELAY_FILES_PER_REQUEST", "20"))
 
 _markitdown = MarkItDown()
 
@@ -169,28 +170,58 @@ async def _read_upload_within_limit(file: UploadFile, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-@app.post("/api/temp-upload")
-async def temp_upload(request: Request, file: UploadFile):
-    if not file.filename:
-        raise HTTPException(400, "Thiếu file.")
-    content = await _read_upload_within_limit(file, MAX_RELAY_UPLOAD_BYTES)
-    try:
-        token, filename = await asyncio.to_thread(temp_files.save_temp_file, file.filename, content)
-    except temp_files.UnsupportedRelayExtension as exc:
-        ext = str(exc) or "(không rõ định dạng)"
-        allowed = ", ".join(sorted(temp_files.ALLOWED_RELAY_EXTENSIONS))
-        raise HTTPException(
-            400, f"Chỉ hỗ trợ relay file {allowed}, nhận được: {ext}"
-        ) from None
+def _build_download_url(request: Request, token: str, filename: str) -> str:
     if PUBLIC_BASE_URL:
-        url = f"{PUBLIC_BASE_URL}/dl/{token}/{filename}"
-    else:
-        logger.warning(
-            "PUBLIC_BASE_URL chưa set — URL /dl/ dùng scheme suy ra từ request, có thể sai "
-            "http/https khi chạy sau reverse-proxy không forward đúng X-Forwarded-Proto."
+        return f"{PUBLIC_BASE_URL}/dl/{token}/{filename}"
+    logger.warning(
+        "PUBLIC_BASE_URL chưa set — URL /dl/ dùng scheme suy ra từ request, có thể sai "
+        "http/https khi chạy sau reverse-proxy không forward đúng X-Forwarded-Proto."
+    )
+    return str(request.url_for("download_temp_file", token=token, filename=filename))
+
+
+@app.post("/api/temp-upload")
+async def temp_upload(request: Request, files: list[UploadFile]):
+    if not files:
+        raise HTTPException(400, "Thiếu file.")
+    if len(files) > MAX_RELAY_FILES_PER_REQUEST:
+        raise HTTPException(
+            400, f"Tối đa {MAX_RELAY_FILES_PER_REQUEST} file mỗi lần upload, nhận {len(files)}."
         )
-        url = str(request.url_for("download_temp_file", token=token, filename=filename))
-    return JSONResponse({"url": url, "expires_in_seconds": temp_files.TEMP_UPLOAD_TTL_SECONDS})
+
+    # Validate extension của TẤT CẢ file trước khi lưu file nào — tránh rollback cho lỗi
+    # extension (rẻ, check trước khi ghi gì cả). Lỗi size-limit (413) hay OSError lúc ghi
+    # disk GIỮA vòng lưu vẫn cần rollback thật — xem try/except quanh vòng save dưới.
+    for f in files:
+        if not f.filename:
+            raise HTTPException(400, "Thiếu tên file.")
+        try:
+            temp_files.check_extension(f.filename)
+        except temp_files.UnsupportedRelayExtension as exc:
+            ext = str(exc) or "(không rõ định dạng)"
+            allowed = ", ".join(sorted(temp_files.ALLOWED_RELAY_EXTENSIONS))
+            raise HTTPException(
+                400,
+                f"'{f.filename}': chỉ hỗ trợ relay file {allowed}, nhận được: {ext}",
+            ) from None
+
+    results = []
+    saved_tokens: list[str] = []
+    try:
+        for f in files:
+            content = await _read_upload_within_limit(f, MAX_RELAY_UPLOAD_BYTES)
+            token, filename = await asyncio.to_thread(temp_files.save_temp_file, f.filename, content)
+            saved_tokens.append(token)
+            results.append({"filename": filename, "url": _build_download_url(request, token, filename)})
+    except Exception:
+        # Giữ đúng nghĩa all-or-nothing: 1 file giữa batch lỗi (413 vượt size, hoặc OSError
+        # lúc ghi disk) → dọn sạch các file batch này đã lưu trước đó, đừng để leak "thành
+        # công 1 nửa" mà response lại báo lỗi toàn batch.
+        for saved_token in saved_tokens:
+            await asyncio.to_thread(temp_files.discard_temp_file, saved_token)
+        raise
+
+    return JSONResponse({"files": results, "expires_in_seconds": temp_files.TEMP_UPLOAD_TTL_SECONDS})
 
 
 @app.get("/dl/{token}/{filename}")
